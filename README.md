@@ -1,8 +1,8 @@
 # Whisper Simple Realtime
 
-Based on heavily reduced ([Whisper Live](https://github.com/collabora/WhisperLive)) by ([Collabora](https://github.com/collabora)) WSR (Whisper Simple Realtime) gives the base for realtime transcription with Whisper.ai.
+Based on heavily reduced ([Whisper Live](https://github.com/collabora/WhisperLive)) by ([Collabora](https://github.com/collabora)) WSR (Whisper Simple Realtime) gives the base for creating realtime transcription with Whisper.ai.
 
-The implementation is very simple and lacks a lot of features on purpose, it's goal is to provide the base for more complex work.
+The implementation is very simple and lacks a lot of features on purpose, its goal is to provide crude base for more complex work.
 
 # Installation
 
