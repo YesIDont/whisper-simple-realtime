@@ -1,11 +1,21 @@
 import time
 from server import TranscriptionServer
+from server import TranscriptEvent
 
 if __name__ == "__main__":
-    transcription = TranscriptionServer(
-        debug = True,
-        print_transcript = True
-    )
+    transcription = TranscriptionServer()
+
+    def on_new_transcription(text):
+        transcription.clear()
+        print(text)
+
+    transcription.add_event_handler(TranscriptEvent.TRANSCRIPTION_CHANGE, on_new_transcription)
+
+    def on_repeated_threshold_exceeded(text):
+        transcription.clear()
+        print(text)
+
+    transcription.add_event_handler(TranscriptEvent.REPEATED_THRESHOLD, on_repeated_threshold_exceeded)
 
     transcription.listen()
 

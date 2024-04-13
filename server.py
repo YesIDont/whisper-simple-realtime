@@ -1,3 +1,4 @@
+from enum import Enum
 import os
 import platform
 import re as regex
@@ -32,8 +33,17 @@ def info(text, use_log_timer = False):
 def error(text, use_log_timer = False):
     custom_log(f"[ERROR]: {text}", use_log_timer)
 
+
+class TranscriptEvent(Enum):
+    # fired when silence is detected after speach in specyfied time
+    SILENCE_AFTER = 0
+    # fired when change in the transcription is detected
+    TRANSCRIPTION_CHANGE = 1
+    # fired when the same output is detected given n times
+    REPEATED_THRESHOLD = 2
+
 class Event:
-    def __init__(self, category, callback):
+    def __init__(self, category: TranscriptEvent, callback):
         self.category = category
         self.callback = callback
 
@@ -83,9 +93,16 @@ class TranscriptionServer:
             "Napisy stworzone przez społeczność Amara.org"
             "Amara.org",
             "Dzięki za uwagę",
+            "Dzięki za obejrzenie!",
+            "Transkrypcja Magdalena Świerczek-Gryboś",
+            "Transkrypcja Magdalena Świerczek-Gryboś © PTA – TVP",\
+            "PTA – TVP",
             "Dziękuję za uwagę",
+            "Dziękuję za uwagę i do zobaczenia w kolejnym odcinku.",
             "Produkcja Polskie Towarzystwo Astronomiczne Telewizja Polska",
-            "Nie zapomnijcie zasubskrybować oraz zafollowować mnie na Facebooku!"
+            "Nie zapomnijcie zasubskrybować oraz zafollowować mnie na Facebooku!",
+            "Zdjęcia i montaż",
+            "Pracownia Prawa i Sprawiedliwość"
         ]
 
         """ Transcription state """
@@ -139,21 +156,13 @@ class TranscriptionServer:
 
         self.events: List[Event] = []
 
-        # self.on_speach_silence_detected_events = []
-        # self.on_repeated_threshold_reached_events = []
+    def add_event_handler(self, category: TranscriptEvent, callback):
+        if not isinstance(category, TranscriptEvent):
+            raise ValueError("Invalid event type")
 
-    def add_event_handler(self, category, callback):
-        # event fired when silence is detected after speach
-        if category == 'silenceafter':
-            self.events.append(Event('silenceafter', callback))
-            return
+        self.events.append(Event(category, callback))
 
-        # event fired when the same output is detected given n times
-        if category == 'repeatedthreshold':
-            self.events.append(Event('repeatedthreshold', callback))
-            return
-
-    def get_events_by_category(self, category):
+    def get_events_by_category(self, category: TranscriptEvent):
         return [event.callback for event in self.events if event.category == category]
 
     def clear(self):
@@ -165,12 +174,17 @@ class TranscriptionServer:
 
         return cleared
 
-    def check_for_excluded_phrases(self, text):
+    def includes_excluded_phrase(self, text):
         clean_new_text = regex.sub(r'[^a-zA-Z]', '', text, flags=regex.UNICODE).lower()
+        text_stripped = text.strip().lower()
         for phrase in self.excluded_phrases:
             clean_phrase = regex.sub(r'[^a-zA-Z]', '', phrase, flags=regex.UNICODE).lower()
             # if self.debug: info(f"Checking for excluded phrase: {clean_new_text} in {clean_phrase}")
-            if phrase.strip() in text.strip() or clean_phrase in clean_new_text:
+            # print('------------------------------')
+            # print(phrase.strip() , text.strip() , clean_phrase , clean_new_text)
+
+            phrase_stripped = phrase.strip().lower()
+            if phrase_stripped in text_stripped or text_stripped in phrase_stripped or clean_phrase in clean_new_text or clean_new_text in clean_phrase:
                 return True
 
         return False
@@ -196,17 +210,17 @@ class TranscriptionServer:
         if self.audio_stream_thread is not None: self.audio_stream_thread.join()
         if self.transcription_thread is not None: self.transcription_thread.join()
 
-    def process_new_segments(self, segments, sample_duration):
+    def process_new_segments(self, new_segments, sample_duration):
         offset = None
         reached_repeat_threshold = False
 
         filtered_segments = []
-        for segment in segments:
+        for segment in new_segments:
             # if self.debug: info(f"New segment: {segment.text}")
-            if not self.check_for_excluded_phrases(segment.text):
+            if not self.includes_excluded_phrase(segment.text):
                 filtered_segments.append(segment)
             else:
-                info(f"Excluded phrase detected: {segment.text}")
+                if self.debug: info(f"Excluded phrase detected: {segment.text}")
 
         if len(filtered_segments) == 0:
             return reached_repeat_threshold
@@ -262,7 +276,7 @@ class TranscriptionServer:
                 vad_filter = True,
                 vad_parameters = self.vad_parameters,
                 initial_prompt = self.last_unfinished
-            )
+                )
             return result
         except Exception as e:
             if self.debug: error(f"Failed to transcribe audio chunk: {e}")
@@ -324,14 +338,24 @@ class TranscriptionServer:
                         if len(result) > 0:
                             if self.debug and self.print_in_loop: info("[LOOP] processing result", True)
                             self.t_start = None
+                            old_transcript = self.get_full_transcript()
                             reached_repeat_threshold = self.process_new_segments(result, duration)
+
+                            new_transcript = self.get_full_transcript()
+                            if old_transcript != new_transcript:
+                                events = self.get_events_by_category(TranscriptEvent.TRANSCRIPTION_CHANGE)
+                                if len(events):
+                                    info("[EVENT]: transcription change detected")
+                                    text = self.get_full_transcript()
+                                    for event in events:
+                                        event(text)
 
                             if reached_repeat_threshold:
                                 if self.debug and self.print_in_loop: info("[EVENT]: reached repeat threshold")
-                                events = self.get_events_by_category('repeatedthreshold')
+                                events = self.get_events_by_category(TranscriptEvent.REPEATED_THRESHOLD)
                                 if len(events):
                                     text = self.get_full_transcript()
-                                    info(f"Transcript on reached repeat threshold: {text}")
+                                    if self.debug and self.print_in_loop: info(f"Transcript on reached repeat threshold: {text}")
                                     reset_state = False
                                     for event in events:
                                         should_reset = event(text)
@@ -346,10 +370,10 @@ class TranscriptionServer:
                             if len(self.transcript) and self.transcript[-1] != '':
                                 if time.time() - self.t_start > self.speach_silence_threshold:
                                     if self.debug and self.print_in_loop:
-                                        info("[LOOP] Detected silence in audio input for {self.speach_silence_threshold} seconds")
+                                        if self.debug and self.print_in_loop: info("[LOOP] Detected silence in audio input for {self.speach_silence_threshold} seconds")
                                     self.transcript.append('')
 
-                                    events = self.get_events_by_category('silenceafter')
+                                    events = self.get_events_by_category(TranscriptEvent.SILENCE_AFTER)
                                     if len(events):
                                         if self.debug and self.print_in_loop: info("[EVENT]: silence after speach detected")
                                         text = self.get_full_transcript()
