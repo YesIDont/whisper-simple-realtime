@@ -10,6 +10,8 @@ The implementation is very simple and lacks a lot of features on purpose, its go
 
    `conda create -p ./.conda python=3.9`
 
+   The maximmum working tested version of Python is 3.9
+
 2. Activate it with:
 
    `conda activate ./.conda`
