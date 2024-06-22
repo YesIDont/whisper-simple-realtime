@@ -9,3 +9,4 @@ onnxruntime==1.16.0
 numpy
 pyaudio
 pyautogui
+websocket

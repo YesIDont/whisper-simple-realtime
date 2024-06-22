@@ -8,7 +8,7 @@ The implementation is very simple and lacks a lot of features on purpose, its go
 
 1. As a good practice its best to create local environment, e.g:
 
-   `conda create -p ./.conda python=3.9`
+   `conda create -p ./.env python=3.9`
 
    The maximmum working tested version of Python is 3.9
 

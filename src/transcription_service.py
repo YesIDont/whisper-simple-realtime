@@ -1,9 +1,10 @@
-from enum import Enum
+import logging
 import os
 import platform
 import re as regex
 import threading
 import time
+from enum import Enum
 from typing import List
 
 import numpy
@@ -12,27 +13,11 @@ import pyautogui
 import pyperclip
 import torch
 
-from transcriber import WhisperModel
+from custom_logger import error, info, warn
+from src.transcriber import WhisperModel
 
-last_print = ""
-
-log_timer = time.time()
-log_delay = 0.1
-
-""" Log method with timer funcionality that helps avoid flooding loops with the same message. """
-def custom_log(text, use_log_timer = False):
-    global last_print, log_timer
-    if last_print != text and (not use_log_timer or log_delay == 0 or time.time() - log_timer > log_delay):
-        log_timer = time.time()
-        print(f"{text}")
-        last_print = text
-
-def info(text, use_log_timer = False):
-    custom_log(f"[INFO]: {text}", use_log_timer)
-
-def error(text, use_log_timer = False):
-    custom_log(f"[ERROR]: {text}", use_log_timer)
-
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
 
 class TranscriptEvent(Enum):
     # fired when silence is detected after speach in specyfied time
@@ -47,11 +32,11 @@ class Event:
         self.category = category
         self.callback = callback
 
-class TranscriptionServer:
+class TranscriptionService:
     def __init__(
             self,
-            language = "pl",
-            multilingual = True,
+            language = "en",
+            multilingual = False,
             transcription_task = "transcribe",
             vad_parameters = None,
             model_size =
@@ -64,6 +49,8 @@ class TranscriptionServer:
             print_transcript = False,
             clear_before_transcript_print = False
         ):
+
+        print(f"Cuda available: {torch.cuda.is_available()}")
 
         """ Transcription options """
         self.multilingual = multilingual
@@ -85,7 +72,9 @@ class TranscriptionServer:
             compute_type="float16" if self.device=="cuda" else "int8",
             local_files_only=False,
         )
-        # phrases that will cause the segment to be dropped (not used in the final transcript)
+
+        """ Phrases that will cause the segment to be dropped (not used in the final transcript).
+        They come from the model being trained on silent audio chunks with subtitles in movies, YouTube videos, tv shows, etc."""
         self.excluded_phrases = [
             "PARROT TV",
             "Thank you for your support on Patronite.",
@@ -99,10 +88,18 @@ class TranscriptionServer:
             "PTA – TVP",
             "Dziękuję za uwagę",
             "Dziękuję za uwagę i do zobaczenia w kolejnym odcinku.",
+            "Polskie Towarzystwo Astronomiczne",
             "Produkcja Polskie Towarzystwo Astronomiczne Telewizja Polska",
+            "zapomnijcie zasubskrybować",
+            "zafollowować",
             "Nie zapomnijcie zasubskrybować oraz zafollowować mnie na Facebooku!",
             "Zdjęcia i montaż",
-            "Pracownia Prawa i Sprawiedliwość"
+            "Pracownia Prawa i Sprawiedliwość",
+            "www.astronarium.pl",
+            "www.facebook.com",
+            "Towarzystwo Astronomiczne",
+            "Polska Transkrypcja Magdalena Świerczek-Gryboś",
+            "Wszystkie informacje są w opisie."
         ]
 
         """ Transcription state """
@@ -199,10 +196,6 @@ class TranscriptionServer:
         else:
             pyautogui.hotkey("ctrl", "v")
 
-    def bytes_to_float_array(self, audio_data_bytes):
-        raw_data = numpy.frombuffer(audio_data_bytes, dtype=numpy.int16)
-        return raw_data.astype(numpy.float32) / 32768.0
-
     def cleanup(self):
         self.exit_flag.set()
         self.stream.close()
@@ -268,6 +261,8 @@ class TranscriptionServer:
         return ''.join(self.transcript) + self.last_unfinished
 
     def transcribe(self, audio_data):
+        """ This method will return either new segments or None. Mind that the speach_to_text method can also return None. if the VAD filter woul remove silence from the whole audio chunk. This means that the return value of this method needs to be always checked."""
+
         try:
             result, _info = self.speach_to_text.transcribe(
                 audio_data,
@@ -278,14 +273,16 @@ class TranscriptionServer:
                 initial_prompt = self.last_unfinished
                 )
             return result
-        except Exception as e:
-            if self.debug: error(f"Failed to transcribe audio chunk: {e}")
 
-    def speech_to_text_thread(self):
+        except Exception as e:
+            error(f"Failed to transcribe audio chunk: {e}", exc_info=True)
+            return None
+
+    def transcription_loop(self):
         try:
             while not self.exit_flag.is_set():
                 if self.is_paused:
-                    time.sleep(0.01)
+                    time.sleep(0.1)
                     continue
 
                 if self._reset_on_next_tick:
@@ -300,14 +297,14 @@ class TranscriptionServer:
 
                 # no point moving forward if we have no frames to process
                 if self.audio_frames_buffer is None:
-                    if self.debug and self.print_in_loop: info("[LOOP] No frames to process", True)
+                    if self.debug and self.print_in_loop: info("[LOOP] No frames to process")
                     time.sleep(0.01)
                     continue
 
                 num_of_samples_to_skip = int((self.timestamp_offset - self.frames_offset) * self.rate)
                 # Check if the current audio chunk exceeds duration of 25 seconds.
                 if self.audio_frames_buffer[num_of_samples_to_skip:].shape[0] > 25 * self.rate:
-                    # if self.debug and self.print_in_loop: info("[LOOP] Clipping audio chunk as it exceeds 30 seconds", True)
+                    # if self.debug and self.print_in_loop: info("[LOOP] Clipping audio chunk as it exceeds 30 seconds")
 
                     # Calculate the total duration of the audio in the buffer in seconds.
                     duration = self.audio_frames_buffer.shape[0] / self.rate
@@ -324,7 +321,7 @@ class TranscriptionServer:
                 duration = input_bytes.shape[0] / self.rate
 
                 if duration < self.min_sample_duration:
-                    if self.debug and self.print_in_loop: info("[LOOP] sample below min duration", True)
+                    if self.debug and self.print_in_loop: info("[LOOP] sample below min duration")
                     time.sleep(0.01)
                     continue
 
@@ -332,11 +329,16 @@ class TranscriptionServer:
                     if len(input_bytes) > 0:
                         input_sample = input_bytes.copy()
 
-                        if self.debug and self.print_in_loop: info("[LOOP] started transcription", True)
+                        if self.debug and self.print_in_loop: info("[LOOP] started transcription")
                         result = self.transcribe(input_sample)
 
+                        if result is None:
+                            if self.debug and self.print_in_loop: info("[LOOP] no result from transcription")
+                            time.sleep(0.01)
+                            continue
+
                         if len(result) > 0:
-                            if self.debug and self.print_in_loop: info("[LOOP] processing result", True)
+                            if self.debug and self.print_in_loop: info("[LOOP] processing result")
                             self.t_start = None
                             old_transcript = self.get_full_transcript()
                             reached_repeat_threshold = self.process_new_segments(result, duration)
@@ -384,13 +386,13 @@ class TranscriptionServer:
                                         if reset_state: self._reset_state()
 
                 except Exception as e:
-                    if self.debug: error(f"[LOOP]: Failed to transcribe audio chunk: {e}")
+                    error(f" [LOOP]: Transcription failed with error: {e}", exc_info=True)
                     time.sleep(0.01)
 
         except Exception as e:
-             if self.debug: error(f"[LOOP]: {e}")
+             error(f"[LOOP]: The transcription loop failed with error {e}", exc_info=True)
 
-    def add_frames(self, name_frames):
+    def add_frames(self, new_frames):
         if self.audio_frames_buffer is not None:
             # if we have some frames and the total duration of the audio exceeds 45 seconds
             if self.audio_frames_buffer.shape[0] > 45 * self.rate:
@@ -399,31 +401,10 @@ class TranscriptionServer:
                 self.audio_frames_buffer = self.audio_frames_buffer[int(30 * self.rate):]
 
         else:
-            self.audio_frames_buffer = name_frames.copy()
+            self.audio_frames_buffer = new_frames.copy()
             return
 
-        self.audio_frames_buffer = numpy.concatenate((self.audio_frames_buffer, name_frames), axis=0)
-
-    def receive_audio_stream(self):
-        while not self.exit_flag.is_set():
-            try:
-                if self.is_paused:
-                    time.sleep(0.01)
-                    continue
-
-                audio_bufer = self.stream.read(self.chunk, exception_on_overflow=False)
-                frame = self.bytes_to_float_array(audio_bufer)
-
-                if self.debug and self.print_first_samples_from_chunk:
-                    info(f"Audio samples {len(frame)}: [0]: {frame[0]}, [1]: {frame[1]}, [2]: {frame[2]}", True)
-                    info(f"Number of samples: {len(frame)}", True)
-
-                frame = numpy.clip(frame, -1.0, 1.0)
-                self.add_frames(frame)
-
-            except Exception as e:
-                if self.debug: error(f"Error while capturing audio stream: {e}")
-                break
+        self.audio_frames_buffer = numpy.concatenate((self.audio_frames_buffer, new_frames), axis=0)
 
     def _reset_state(self):
         self.transcript = []
@@ -447,24 +428,4 @@ class TranscriptionServer:
     def resume(self):
         if self.debug: info("Resuming transcription.")
         self.is_paused = False
-
-    def listen(self, start_paused = False):
-        self.is_paused = start_paused
-
-        try:
-            self.audio_stream_thread = threading.Thread(target=self.receive_audio_stream, daemon=True)
-            if self.debug: info(f"Started audio stream thread")
-
-        except Exception as e:
-            if self.debug: error(f"Could not initiate websocket thread: {e}")
-
-        try:
-            self.transcription_thread = threading.Thread(target=self.speech_to_text_thread, daemon=True)
-            if self.debug: info(f"Started transcription thread:\n    - model: {self.model_size}\n    - device: {self.device}\n    - device index: {self.device_index}")
-
-        except Exception as e:
-            if self.debug: error(f"Could not initiate server thread: {e}")
-
-        self.audio_stream_thread.start()
-        self.transcription_thread.start()
 
